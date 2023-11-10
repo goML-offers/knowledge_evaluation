@@ -146,7 +146,7 @@ class QAChatbot:
 chatbot = QAChatbot()
 
 @app.post("/upload/")
-async def upload_pdf(pdf_file: UploadFile):
+async def upload_pdf(pdf_file: UploadFile = File(...)):
     with open(pdf_file.filename, "wb") as f:
         f.write(pdf_file.file.read())
 
