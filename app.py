@@ -2,8 +2,7 @@ from fastapi import FastAPI, File, UploadFile
 from transformers import T5ForConditionalGeneration, T5Tokenizer
 from langchain.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from transformers import DistilBertTokenizer, DistilBertForQuestionAnswering
-from transformers import ElectraTokenizer, ElectraForQuestionAnswering
+
 import torch
 import uvicorn
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -32,8 +31,10 @@ from sentence_transformers import SentenceTransformer, util
 from fastapi.middleware.cors import CORSMiddleware
 import random
 from dotenv import load_dotenv
+import pandas as pd
+import json
 
-
+import re
 load_dotenv()
 
 PINECONE_INDEX_NAME = os.getenv('PINECONE_INDEX_NAME')  # 'kn1'
@@ -80,26 +81,6 @@ app.add_middleware(
 
 )
 
-# Initialize DistilBERT model and tokenizer
-model_name = 'distilbert-base-uncased'
-tokenizer = DistilBertTokenizer.from_pretrained(model_name)
-model = DistilBertModel.from_pretrained(model_name)
-
-# Initialize OpenAI embeddings
-openai_embeddings = OpenAIEmbeddings()
-
-# Initialize TF-IDF Vectorizer
-tfidf_vectorizer = TfidfVectorizer()
-
-
-# Load the T5 question generation model and tokenizer
-question_model = T5ForConditionalGeneration.from_pretrained("allenai/t5-small-squad2-question-generation")
-question_tokenizer = T5Tokenizer.from_pretrained("allenai/t5-small-squad2-question-generation")
-
-
-
-#model=sentence_similarity(model_name='distilbert-base-uncased',embedding_type='cls_token_embedding')
-simi_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
 
 class QAChatbot:
     def __init__(self):
@@ -107,25 +88,22 @@ class QAChatbot:
         self.question_index = 0
         self.questions = []
         self.answers = []
-        
-    def generate_question(self, chunk_text):
-    # Generate a question from the current chunk
-        input_text = f"Generate a question from the following text and skip lexion plan:  {chunk_text} s"
-        print(chunk_text)
-        generated_question = question_model.generate(
-            question_tokenizer.encode(input_text, return_tensors="pt"),
-            max_length=64,
-            num_return_sequences=1,
-            no_repeat_ngram_size=2,
-            top_k=50,
-            top_p=0.95
-        )
-        generated_question = question_tokenizer.decode(generated_question[0], skip_special_tokens=True)
-        self.questions.append(generated_question)
-        return self.questions
-    
 
-    def generate_answer(self):
+    def generate_question(self):
+    # Generate a question from the current chunk
+        # input_text = f"Generate a question from the following text and skip lexion plan:  {chunk_text} s"
+        # print(chunk_text)
+        # generated_question = question_model.generate(
+        #     question_tokenizer.encode(input_text, return_tensors="pt"),
+        #     max_length=64,
+        #     num_return_sequences=1,
+        #     no_repeat_ngram_size=2,
+        #     top_k=50,
+        #     top_p=0.95
+        # )
+        # generated_question = question_tokenizer.decode(generated_question[0], skip_special_tokens=True)
+        # self.questions.append(generated_question)
+        # return self.questions
         llm_chat = ChatOpenAI(temperature=0.9, max_tokens=150,
                       model='gpt-3.5-turbo-0613', client='')
 
@@ -137,16 +115,65 @@ class QAChatbot:
         # Create chain
         chain = load_qa_chain(llm_chat)
 
-        search = docsearch.similarity_search(chatbot.questions[-1])
-        response = chain.run(input_documents=search, question=chatbot.questions[-1])
+        search = docsearch.similarity_search('list down 6 follow up questions based on the documents in a json array format.For example ["question1","question2"]')
+        response = chain.run(input_documents=search, question='list down 6 follow up questions based on the documents in a json array format.For example ["question1","question2"]')
+        
+        #print('Response:', response)
+        print(response)
+        print("===============")
+        # data=pd.DataFrame({"response":eval(response)})
+        # data.to_csv('data.csv')
+        # addon=["Allow me to pose a question that enriches your learning experience. ",
+        #         "Allow me to stimulate your learning with a thoughtful question. ",
+        #         "Presenting a query to brush up on your learning endeavors. ",
+        #         "Allow me to ask you a question that adds a sparkle to your learning. "]
+        # addon = random.choice(addon)
+        # if os.path.exists('data.csv'):
+        #     addon+data['response'].iloc[0]
+        # print(addon+data['response'].iloc[0])
+        response=re.sub(r'[^a-zA-Z0-9\s,]', '', response)
+        response=list(response.split(','))
+        
+        print(response)
+        return response
+    
+    def generate_answer(self, current_question):
+        llm_chat = ChatOpenAI(temperature=0.9, max_tokens=150,
+                      model='gpt-3.5-turbo-0613', client='')
+
+        embeddings = OpenAIEmbeddings(client='')
+
+        # Set Pinecone index
+        docsearch = Pinecone.from_existing_index(
+            index_name=PINECONE_INDEX_NAME, embedding=embeddings)
+        # Create chain
+        chain = load_qa_chain(llm_chat)
+
+        # Use the provided current question instead of the last question in the list
+        search = docsearch.similarity_search(current_question)
+        response = chain.run(input_documents=search, question=current_question)
         
         print('Response:', response)
-        return response
+        print("++=========================",search)
+        search=search[0].page_content
+        print(search)
+        return response,search
+
+    def ask_GPT3(self,str1,str2): 
+        completion = openai.ChatCompletion.create( # Change the function Completion to ChatCompletion
+        model = 'gpt-3.5-turbo',
+        messages = [ # Change the prompt parameter to the messages parameter
+        {'role': 'user', 'content': f'what is the exact similarity between two strings in an array below : [{str1}, {str2}]. Provide a decimal number as an output with no description! for example 0.55'}
+        ],
+        temperature = 0  
+        )
+        return completion['choices'][0]['message']['content']
+
 
 chatbot = QAChatbot()
 
 @app.post("/upload/")
-async def upload_pdf(pdf_file: UploadFile):
+async def upload_pdf(pdf_file: UploadFile = File(...)):
     with open(pdf_file.filename, "wb") as f:
         f.write(pdf_file.file.read())
 
@@ -173,68 +200,71 @@ async def upload_pdf(pdf_file: UploadFile):
     os.remove(pdf_file.filename)
     print('Done!')
 
-
 @app.post("/generate_ques_ans/")
 async def generate_question_and_answer():
     if chatbot.question_index < len(chatbot.chunks):
-        # Generate a question
-        query_text = chatbot.chunks[chatbot.question_index].page_content
-        generated_question = chatbot.generate_question(query_text)
+        # Generate questions
+        # query_text = chatbot.chunks[chatbot.question_index].page_content
+        generated_questions = chatbot.generate_question()
+        print(generated_questions)
+        print(type(generated_questions))
+        # Initialize an empty list to store the responses
+        responses_list = []
+         
+        question_count=len(generated_questions)
+        # Iterate through the generated questions and generate answers
+        for i in range(question_count):
+            # Generate an answer
+            gen_ques=generated_questions[i]
+            gen_answer,search= chatbot.generate_answer(gen_ques)
+            # print(search)
 
-        # Generate an answer
-        
-        docs = chatbot.generate_answer()
+           
 
-        response_data = {
-            "generated_question": generated_question[-1],
-            "generated_answer": docs
-        }
+            # Create a response dictionary
+            response_data = {
+                "question": gen_ques,
+                "generated_answer": gen_answer,
+                "document":search ,
+            }
 
-        return response_data
+            # Append the response to the list
+            responses_list.append(response_data)
+
+        # # Increment the question index
+        # chatbot.question_index += 1
+
+        # Return the list of responses
+        return responses_list
     else:
         return "No more chunks to process."
+
 @app.post("/user_answer/")
-async def user_answer(answer: str):
-    generated_answer=await generate_question_and_answer()
-    gen_answer=generated_answer['generated_answer']
-    # Calculate TF-IDF vectors for the generated answer and the user's answer
-    tfidf_matrix_generated = tfidf_vectorizer.fit_transform([gen_answer])
-    tfidf_matrix_user = tfidf_vectorizer.transform([answer])
-
-    # Calculate cosine similarity
-    similarity = cosine_similarity(tfidf_matrix_generated, tfidf_matrix_user)[0][0]
-
-    if similarity > 0.8:
+async def user_answer(answer: str,system_answer:str):
+    # response=await generate_question_and_answer()
+    # print(response)
+    # gen_answer=response[0]['generated_answer']
+    similarity = chatbot.ask_GPT3(answer,system_answer)
+    print(type(similarity))
+    print(similarity)
+    similarity=float(similarity)
+    if similarity > 0.4:
         responses = [
             "Outstanding! Your answer is perfect. Let's move to the next question.",
             "Fantastic! You nailed it. Next question awaits!",
             "Incredible! You're acing these questions. Let's continue.",
         ]
         response = random.choice(responses)
-    elif similarity > 0.6:
-        responses = [
-            "Good job! You are right on the point. Let's move to the next question.",
-            "Impressive! Keep up the great work. your Next question.",
-            "Well done! Your understanding is shining through. On to the next one!",
-        ]
-        response = random.choice(responses)
-    elif similarity > 0.4:
-        responses = [
-            "You are very close to the answer. Try answering again.",
-            "Almost there! Give it another shot.",
-            "Your effort is commendable, but let's try again for a more accurate answer.",
-        ]
-        response = random.choice(responses)
-        return {"response":response}
     else:
         responses = [
-            "Your effort is valued, and improvement is encouraged.Try answering again.",
-            "The answer doesn't seem correct to me. Let's try one more time.",
-            "Nice try! Let's see if we can get a better answer together.",
+            "OOPs! Take a moment to deepen your understanding. This is where you should be going to improve your knowledge",
+            "Great effort! But you need to read more.This is where you should be going to improve your knowledge",
+            "OhOoh! I think you need to brush up this concept once again to become an expert.This is where you should be going to improve your knowledge ",
+            "While you are the teacher here, but I don't think this is the correct answer. Can you please brush this topic up?For now, Here is the correct answer I can acecss."
         ]
         response = random.choice(responses)
-        return {"response":response}
     chatbot.question_index += 1
-    return {"generated_answer": gen_answer, "user_answer": answer, "similarity": similarity,"response":response}
+    
+    return {"generated_answer": system_answer, "user_answer": answer, "similarity": similarity,"response":response}
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8080)
